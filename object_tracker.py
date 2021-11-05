@@ -34,18 +34,21 @@ def main(_argv):
     # Definition of the parameters
     max_cosine_distance = 0.5
     nn_budget = None
-    nms_max_overlap = 1.0
+    nms_max_overlap = 1.0 # 다른 yolo v3 코드에서는 해당 값이 0.3이었음
     
     #initialize deep sort
     model_filename = 'model_data/mars-small128.pb'
     encoder = gdet.create_box_encoder(model_filename, batch_size=1)
-    metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
-    tracker = Tracker(metric)
+    metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget) # metric은 consine distance로,
+    # matching_threshold는 위에서 설정한 max_cosine_distance로, budget은 nn_budget으로 설정
+    tracker = Tracker(metric) # max_iou_distance는 default값인 0.7, max_age는 default인 3, n_init은 3으로 설정
 
+    # Tensorflow를 사용하므로 GPU를 사용. 이때 physical_devices의 길이가 0 초과인 경우에만 메모리 증가를 허용
     physical_devices = tf.config.experimental.list_physical_devices('GPU')
     if len(physical_devices) > 0:
         tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
+    # 플래그가... 뭐지? 파라미터 값을 고정시켜 주는 거라는데...
     if FLAGS.tiny:
         yolo = YoloV3Tiny(classes=FLAGS.num_classes)
     else:
@@ -93,8 +96,8 @@ def main(_argv):
         img_in = transform_images(img_in, FLAGS.size)
 
         t1 = time.time()
-        boxes, scores, classes, nums = yolo.predict(img_in)
-        classes = classes[0]
+        boxes, scores, classes, nums = yolo.predict(img_in) # 다른 코드에서는 predict가 아닌 detect_image 사용
+        classes = classes[0] # 다른 코드에는 없던 classes 변수
         names = []
         for i in range(len(classes)):
             names.append(class_names[int(classes[i])])
@@ -107,7 +110,8 @@ def main(_argv):
         cmap = plt.get_cmap('tab20b')
         colors = [cmap(i)[:3] for i in np.linspace(0, 1, 20)]
 
-        # run non-maxima suppresion
+        # run non-maxima suppression
+        # 뭔지 몰라서 찾아보니 하나의 object에 여러 개의 bbox(entity)가 겹치면 하나로 합쳐주는 역할
         boxs = np.array([d.tlwh for d in detections])
         scores = np.array([d.confidence for d in detections])
         classes = np.array([d.class_name for d in detections])
@@ -115,13 +119,22 @@ def main(_argv):
         detections = [detections[i] for i in indices]        
 
         # Call the tracker
-        tracker.predict()
-        tracker.update(detections)
+        tracker.predict() # track state distribution을 한 단계 앞으로 전파. update 전마다 한 번씩 호출해야함.
+        # predict에 Kalman filter 포함. 현재의 parameter을 이용해 예측. tracker.py의 predict()함수는 track.py의 predict() 함수를 호출한다.
+        # 이때 kalman_filter.py의 predict() 함수를 통해 mean과 covariance의 값을 예측하고, age와 time_since_update에 1을 더해준다.
+
+        tracker.update(detections) # predict에서 예측된 값으로 현재 parameter을 update
+        # predict -> update가 한 묶음
+        # tracker.py에 있는 _matched를 통해 matches, unmatched tracks, unmatched detections를 할당하는데 이때 track을 confirmed track과 unconfirmed track으로 나눈다.
+        # 이후 linear_assignment.py에 있는 matching cascade 함수를 통해 matched_a, unmatched_tracks_a, unmatched_detections_a를 구한다. 이때 age만큼 for문으로 loop를 도는 것을 볼 수 있다.
+        # matching cascade가 끝나면 unconfirmed track과 unmatched_tracks_a를 이용해 iou_track_candidates를 생성한다.
+        # 이후 min_cost_matching(iou_matching)을 통해 matches_b, unmatched_tracks_b, unmatched_detections_b를 생성한다.
+        # _a가 달린 것과 _b가 달린 것을 합치면 원하는 matches, unmatched tracks, unmatched detections를 얻을 수 있다.
 
         for track in tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
+            if not track.is_confirmed() or track.time_since_update > 1: # track이 confirmed 되었고 time_since_update가 1 초과인 경우 진행
                 continue 
-            bbox = track.to_tlbr()
+            bbox = track.to_tlbr() # to_tlbr()를 통해 bound box를 생성
             class_name = track.get_class()
             color = colors[int(track.track_id) % len(colors)]
             color = [i * 255 for i in color]
@@ -135,7 +148,7 @@ def main(_argv):
         #    cv2.rectangle(img,(int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])),(255,0,0), 2)
         
         # print fps on screen 
-        fps  = ( fps + (1./(time.time()-t1)) ) / 2
+        fps  = ( fps + (1./(time.time()-t1)) ) / 2 # 이 부분이 정확히 어떻게 동작하는 것인지 확인할 필요 있음...
         cv2.putText(img, "FPS: {:.2f}".format(fps), (0, 30),
                           cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (0, 0, 255), 2)
         cv2.imshow('output', img)
